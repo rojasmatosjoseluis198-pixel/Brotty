@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0d1512">
+  <title>Brotty</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;800;900&display=swap">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="rooms" id="rooms">
+    <!-- 1. Movimientos -->
+    <section class="room" data-room="Movimientos">
+      <div class="fondo" data-fondo="rio"></div>
+      <div class="room-in">
+        <h1 class="titulo">Movimientos</h1>
+        <div class="nav-periodo"><button data-act="movMes" data-d="-1">‹</button><span id="movMesLabel"></span><button data-act="movMes" data-d="1">›</button></div>
+        <div id="listaMovs"></div>
+      </div>
+    </section>
+
+    <!-- 2. Inicio -->
+    <section class="room" data-room="Inicio">
+      <div class="fondo" data-fondo="bosque"></div>
+      <div class="room-in inicio">
+        <div class="barra-top">
+          <button class="icon-btn" data-act="ajustes" aria-label="Ajustes">⚙️</button>
+          <button class="icon-btn badge" data-act="irPrestamos" aria-label="Préstamos">🤝 <b id="nPrest">0</b></button>
+        </div>
+        <div class="brotty-zona">
+          <div class="globo" id="globo"></div>
+          <div class="brotty" id="brotty" data-act="tocarBrotty"></div>
+        </div>
+        <div class="hoy">
+          <div class="hoy-lbl">Hoy puedes gastar</div>
+          <div class="hoy-num" id="hoyNum">S/ 0.00</div>
+          <div class="barra"><i id="hoyBarra"></i></div>
+          <div class="hoy-sub" id="hoySub"></div>
+          <div class="hoy-sub" id="subLine"></div>
+        </div>
+        <div id="avisos"></div>
+        <div id="chips"></div>
+      </div>
+    </section>
+
+    <!-- 3. Estadísticas -->
+    <section class="room" data-room="Estadísticas">
+      <div class="fondo" data-fondo="selva"></div>
+      <div class="room-in">
+        <h1 class="titulo">Estadísticas</h1>
+        <div class="seg" id="segStats">
+          <button data-act="statsModo" data-m="semana" class="on">Semana</button>
+          <button data-act="statsModo" data-m="mes">Mes</button>
+        </div>
+        <div class="nav-periodo"><button data-act="statsNav" data-d="-1">‹</button><span id="statsLabel"></span><button data-act="statsNav" data-d="1">›</button></div>
+        <div id="stats"></div>
+      </div>
+    </section>
+
+    <!-- 4. Metas -->
+    <section class="room" data-room="Metas">
+      <div class="fondo" data-fondo="montania"></div>
+      <div class="room-in">
+        <h1 class="titulo">Metas</h1>
+        <div id="metas"></div>
+      </div>
+    </section>
+
+    <!-- 5. Pagos y préstamos -->
+    <section class="room" data-room="Pagos y préstamos">
+      <div class="fondo" data-fondo="fogata"></div>
+      <div class="room-in">
+        <h1 class="titulo">Pagos y préstamos</h1>
+        <div id="pagos"></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="puntos" id="puntos"></div>
+  <button class="fab" data-act="nuevo" aria-label="Registrar">+</button>
+
+  <div class="sheet-wrap" id="sheetWrap"><div class="sheet" id="sheet"></div></div>
+  <div class="toast" id="toast"></div>
+
+  <script src="brotty.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
