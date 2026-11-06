@@ -237,3 +237,6 @@ input, select { user-select: text; }
 .toast.ver { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
 .toast span { white-space: nowrap; }
 .toast button { background: none; border: 0; color: #0f7a3c; font-weight: 900; text-decoration: underline; cursor: pointer; }
+
+.sobrante { border-color: #6b5a12; background: rgba(40, 34, 10, .9); }
+.copa-wrap svg { width: 200px; height: 230px; }

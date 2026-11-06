@@ -1,6 +1,6 @@
 // Guarda Brotty en el celular para que funcione sin internet.
 // Al actualizar la app, sube este número (v2, v3...).
-const CACHE = "brotty-v1";
+const CACHE = "brotty-v3";
 const ARCHIVOS = ["./", "index.html", "styles.css", "app.js", "brotty.js", "manifest.json",
   "icons/icon-192.png", "icons/icon-512.png", "icons/maskable-512.png"];
 

@@ -43,6 +43,7 @@ const CATS = {
 const CATS_GASTO = ["ingredientes", "fuera", "snacks", "univ", "transporte", "salidas", "invitar", "cuidado", "otros"];
 const CATS_INGRESO = ["subvencion", "papas", "otros_i"];
 const LUGARES = { mercado: "🧺 Mercado", bodega: "🏪 Bodega", univ: "🏫 Universidad", otro: "📍 Otro" };
+const ICONOS_PAGO = ["🏠", "🚌", "📱", "🤖", "📚", "💡", "💧", "💳", "🏋️", "🎵", "📦"];
 const DIAS_CORTOS = ["D", "L", "M", "M", "J", "V", "S"];
 
 // ---------- Estado ----------
@@ -84,55 +85,93 @@ const pagadoP = (p, antesDe) => suma(p.pagos.filter((x) => !antesDe || x.fecha <
 const pendienteP = (p) => r2(p.monto - pagadoP(p));
 const ahorradoMeta = (m) => suma(m.movs, (x) => x.monto);
 
+const comidaSemPresup = () => (E.config.modo === "ciclo" ? +E.config.comidaSem : +E.config.comidaSemVac) || 0;
+const lunesDe = (f) => addDias(f, -((parse(f).getDay() + 6) % 7));
+const comidaGastada = (f, antesDe) => suma(E.movs.filter((m) => m.cat === "ingredientes" && m.fecha >= lunesDe(f) && m.fecha < antesDe), (m) => m.monto);
+
+// Dinero libre (sin metas) al empezar el día f
+function libreAntes(f) {
+  let s = +E.config.saldoInicial || 0;
+  for (const m of E.movs) if (m.fecha < f) s += m.tipo === "ingreso" ? m.monto : -m.monto;
+  for (const p of E.prestamos) {
+    const sig = p.tipo === "debo" ? 1 : -1;
+    if (p.fecha < f) s += sig * p.monto;
+    for (const x of p.pagos) if (x.fecha < f) s -= sig * x.monto;
+  }
+  for (const m of E.metas) for (const x of m.movs) if (x.fecha < f) s -= x.monto;
+  return s;
+}
+
+// Calcula un día: cuánto se podía gastar y cuánto se gastó fuera de lo previsto
+function calcDia(f, S, sob) {
+  const c = E.config;
+  let D = difDias(f, S); if (D <= 0) D = 1;
+  const movsDia = E.movs.filter((m) => m.fecha === f);
+  const ingSub = suma(movsDia.filter((m) => m.tipo === "ingreso" && (m.cat === "subvencion" || m.cat === "ajuste")), (m) => m.monto);
+  const ingExtra = suma(movsDia.filter((m) => m.tipo === "ingreso" && m.cat !== "subvencion" && m.cat !== "ajuste"), (m) => m.monto);
+  const cobros = suma(E.prestamos.filter((p) => p.tipo === "preste").flatMap((p) => p.pagos.filter((x) => x.fecha === f)), (x) => x.monto);
+  const recibido = suma(E.prestamos.filter((p) => p.tipo === "debo" && p.fecha === f), (p) => p.monto);
+  const aportes = suma(E.metas.flatMap((m) => m.movs.filter((x) => x.fecha === f)), (x) => x.monto);
+  // Lo extra va al sobrante; lo que se aparta a metas sale primero del sobrante
+  sob += ingExtra + cobros;
+  if (aportes > 0) sob -= Math.min(sob, aportes); else sob -= aportes;
+  const base = libreAntes(f) + ingSub + ingExtra + cobros + recibido - aportes;
+
+  // Lo que Brotty aparta hasta la próxima subvención
+  const presSem = comidaSemPresup();
+  const comidaSemana = Math.max(0, presSem - comidaGastada(f, f));
+  const proxLunes = addDias(lunesDe(f), 7);
+  const comidaFutura = proxLunes < S ? (presSem / 7) * difDias(proxLunes, S) : 0;
+  const resComida = r2(comidaSemana + comidaFutura);
+  let resClase = 0, diasClase = 0;
+  for (let i = 0; i < D; i++) { const k = costoClase(addDias(f, i)); resClase += k.pasaje + k.menu; if (k.pasaje || k.menu) diasClase++; }
+  const pagosRes = E.pagos.filter((p) => (!p.pagadoEl || p.pagadoEl >= f) && !(p.recurrente && p.creadoEl >= f) && p.fecha < S);
+  const resPagos = suma(pagosRes, (p) => p.monto);
+  const resDeudas = suma(E.prestamos.filter((p) => p.tipo === "debo" && p.fecha < f && p.vence && p.vence < S), (p) => Math.max(0, p.monto - pagadoP(p, f)));
+  const reservas = r2(resComida + resClase + resPagos + resDeudas);
+  const libreReal = r2(base - sob - reservas);
+  const diario = r2(Math.max(0, libreReal / D));
+
+  // Gastos del día que no estaban previstos
+  const k = costoClase(f);
+  let pc = comidaSemana, pp = k.pasaje, pm = k.menu, noPrev = 0;
+  for (const m of movsDia.filter((x) => x.tipo === "gasto").sort((a, b) => a.creado - b.creado)) {
+    let p = 0;
+    if (m.cat === "pagos" || m.cat === "ajuste") p = m.monto;
+    else if (m.cat === "ingredientes") { p = Math.min(m.monto, pc); pc -= p; }
+    else if (m.cat === "transporte") { p = Math.min(m.monto, pp); pp -= p; }
+    else if (m.cat === "fuera") { p = Math.min(m.monto, pm); pm -= p; }
+    noPrev += m.monto - p;
+  }
+  const prestado = suma(E.prestamos.filter((p) => p.tipo === "preste" && p.fecha === f), (p) => p.monto);
+  const deudaPag = suma(E.prestamos.filter((p) => p.tipo === "debo").flatMap((p) => p.pagos.filter((x) => x.fecha === f)), (x) => x.monto);
+  noPrev = r2(noPrev + prestado + Math.max(0, deudaPag - resDeudas));
+  return { D, base: r2(base), sob: r2(sob), reservas, resComida, resClase, resPagos, resDeudas, diasClase, libreReal, diario, noPrev, hoy: r2(diario - noPrev), sobFin: r2(sob + Math.max(0, diario - noPrev)) };
+}
+
+// Recorre el período día por día: lo que no se gasta va al sobrante (no se suma al día siguiente)
+function sobranteHasta(fin, S) {
+  const P = inicioPeriodo(addDias(fin, -1));
+  let f = P > E.config.fechaInicio ? P : E.config.fechaInicio, sob = 0, n = 0;
+  while (f < fin && n++ < 200) { sob = calcDia(f, S, sob).sobFin; f = addDias(f, 1); }
+  return sob;
+}
+
 function calc() {
   const c = E.config, T = hoyISO();
-  let S = c.proxSub || addDias(T, 30), subVencida = false;
-  let D = difDias(T, S);
-  if (D <= 0) { D = 1; subVencida = true; }
+  const S = c.proxSub || addDias(T, 30);
+  const subVencida = difDias(T, S) <= 0;
+  const P = inicioPeriodo(T);
+  const ini = P > c.fechaInicio ? P : c.fechaInicio;
+  let f = ini, sob = 0, n = 0;
+  while (f < T && n++ < 200) { sob = calcDia(f, S, sob).sobFin; f = addDias(f, 1); }
+  const r = calcDia(T, S, sob);
 
   let saldo = +c.saldoInicial || 0;
   for (const m of E.movs) saldo += m.tipo === "ingreso" ? m.monto : -m.monto;
   for (const p of E.prestamos) saldo += p.tipo === "debo" ? pendienteP(p) : -pendienteP(p);
   const enMetas = suma(E.metas, ahorradoMeta);
-  const libre = r2(saldo - enMetas);
-
-  // Salidas de hoy (se devuelven para calcular cómo empezó el día)
-  const gHoy = E.movs.filter((m) => m.tipo === "gasto" && m.fecha === T).sort((a, b) => a.creado - b.creado);
-  const prestadoHoy = suma(E.prestamos.filter((p) => p.tipo === "preste" && p.fecha === T), (p) => p.monto);
-  const deudaPagHoy = suma(E.prestamos.filter((p) => p.tipo === "debo").flatMap((p) => p.pagos.filter((x) => x.fecha === T)), (x) => x.monto);
-  const base = r2(libre + suma(gHoy, (m) => m.monto) + prestadoHoy + deudaPagHoy);
-
-  // Lo que hay que apartar hasta la próxima subvención
-  const P = inicioPeriodo(T);
-  const comidaDia = (c.modo === "ciclo" ? +c.comidaSem : +c.comidaSemVac) / 7 || 0;
-  const presupComida = comidaDia * Math.max(1, difDias(P, S));
-  const comidaAntes = suma(E.movs.filter((m) => m.cat === "ingredientes" && m.fecha >= P && m.fecha < T), (m) => m.monto);
-  const resComida = Math.max(0, r2(presupComida - comidaAntes));
-  let resClase = 0;
-  for (let i = 0; i < D; i++) { const k = costoClase(addDias(T, i)); resClase += k.pasaje + k.menu; }
-  const pagosRes = E.pagos.filter((p) => (!p.pagadoEl || p.pagadoEl === T) && !(p.recurrente && p.creadoEl === T) && p.fecha < S);
-  const resPagos = suma(pagosRes, (p) => p.monto);
-  const deudasRes = E.prestamos.filter((p) => p.tipo === "debo" && p.vence && p.vence < S);
-  const resDeudas = suma(deudasRes, (p) => Math.max(0, p.monto - pagadoP(p, T)));
-  const reservas = r2(resComida + resClase + resPagos + resDeudas);
-  const libreReal = r2(base - reservas);
-  const diarioBase = Math.max(0, libreReal / D);
-
-  // Gastos de hoy que NO estaban previstos
-  const kHoy = costoClase(T);
-  let prevComida = resComida, prevPasaje = kHoy.pasaje, prevMenu = kHoy.menu, noPrev = 0;
-  for (const m of gHoy) {
-    let p = 0;
-    if (m.cat === "pagos") p = m.monto;
-    else if (m.cat === "ingredientes") { p = Math.min(m.monto, prevComida); prevComida -= p; }
-    else if (m.cat === "transporte") { p = Math.min(m.monto, prevPasaje); prevPasaje -= p; }
-    else if (m.cat === "fuera") { p = Math.min(m.monto, prevMenu); prevMenu -= p; }
-    noPrev += m.monto - p;
-  }
-  noPrev += prestadoHoy + Math.max(0, deudaPagHoy - resDeudas);
-  noPrev = r2(noPrev);
-  const hoy = r2(diarioBase - noPrev);
-  return { T, S, D, P, subVencida, saldo: r2(saldo), libre, enMetas, base, reservas, resComida, resClase, resPagos, resDeudas, libreReal, diarioBase: r2(diarioBase), noPrev, hoy };
+  return Object.assign(r, { T, S, P, subVencida, saldo: r2(saldo), enMetas, libre: r2(saldo - enMetas), diarioBase: r.diario, sobrante: r.sob });
 }
 
 // ---------- Ánimo de Brotty ----------
@@ -162,6 +201,7 @@ const FONDOS = {
   rio: `<svg viewBox="0 0 400 300" preserveAspectRatio="none"><path d="M0 300 L0 200 Q100 180 200 205 T400 195 L400 300Z" fill="#0c2230"/><path d="M0 300 L0 235 Q100 215 200 240 T400 230 L400 300Z" fill="#0e2c3d"/><path d="M40 255 q20 -8 40 0 M220 270 q20 -8 40 0 M300 248 q15 -6 30 0" stroke="#2f6f8a" stroke-width="3" fill="none"/></svg>`,
   selva: `<svg viewBox="0 0 400 300" preserveAspectRatio="none"><path d="M0 300 C 20 200,60 180,40 120 C 90 160,90 230,70 300Z" fill="#0f2a18"/><path d="M400 300 C 380 210,340 190,360 110 C 310 160,310 230,330 300Z" fill="#0f2a18"/><path d="M120 300 C 140 230,190 220,170 170 C 220 210,210 260,200 300Z" fill="#0b1f12"/><path d="M0 300 L0 260 Q200 230 400 260 L400 300Z" fill="#0b1c14"/></svg>`,
   montania: `<svg viewBox="0 0 400 300" preserveAspectRatio="none"><circle cx="300" cy="150" r="40" fill="#ffd23f" opacity=".25"/><path d="M0 300 L0 220 L90 130 L160 200 L240 110 L330 190 L400 150 L400 300Z" fill="#14271d"/><path d="M0 300 L0 250 L120 190 L220 240 L320 200 L400 230 L400 300Z" fill="#0d1c15"/><path d="M240 110 L222 128 L240 124 L256 130Z" fill="#c7e6d4" opacity=".5"/></svg>`,
+  huerto: `<svg viewBox="0 0 400 300" preserveAspectRatio="none"><path d="M0 300 L0 240 Q200 215 400 240 L400 300Z" fill="#1a1710"/>${[40, 110, 180, 250, 320, 380].map((x, i) => `<g transform="translate(${x} ${238 - (i % 2) * 6})"><path d="M0 0 C 0 -14,2 -22,6 -28" stroke="#2f7a1c" stroke-width="3" fill="none"/><path d="M6 -26 C 12 -34,24 -34,26 -28 C 20 -24,12 -22,6 -26Z" fill="#2fae1d" opacity=".8"/><path d="M4 -20 C -4 -28,-14 -26,-16 -22 C -10 -18,-2 -18,4 -20Z" fill="#259018" opacity=".8"/></g>`).join("")}</svg>`,
   fogata: `<svg viewBox="0 0 400 300" preserveAspectRatio="none"><path d="M0 300 L0 250 Q200 225 400 250 L400 300Z" fill="#14140f"/><g transform="translate(200 238)"><path d="M-30 10 L30 -2 M-30 -2 L30 10" stroke="#5a3a1a" stroke-width="9" stroke-linecap="round"/><path d="M0 -50 C 18 -26,22 -12,0 4 C -22 -12,-18 -26,0 -50Z" fill="#ff7a59" opacity=".8"><animate attributeName="opacity" values=".6;.95;.6" dur="1.2s" repeatCount="indefinite"/></path><path d="M0 -30 C 10 -16,10 -8,0 2 C -10 -8,-10 -16,0 -30Z" fill="#ffd23f"/></g><circle cx="200" cy="215" r="90" fill="#ff7a59" opacity=".06"/></svg>`
 };
 document.querySelectorAll("[data-fondo]").forEach((el) => (el.innerHTML = FONDOS[el.dataset.fondo]));
@@ -182,7 +222,7 @@ window.addEventListener("resize", () => irA(roomIdx, false));
 // ---------- Render ----------
 function render() {
   const k = calc();
-  renderInicio(k); renderMovs(); renderStats(); renderMetas(k); renderPagos(k); pintarPuntos();
+  renderInicio(k); renderMovs(); renderPresup(k); renderStats(); renderMetas(k); renderPagos(k); pintarPuntos();
 }
 
 function renderInicio(k) {
@@ -198,9 +238,9 @@ function renderInicio(k) {
   $("#hoySub").innerHTML = k.hoy < 0
     ? `Hoy te pasaste ${soles(-k.hoy)} · los próximos días se ajustan`
     : `Gastaste hoy ${soles(k.noPrev)} de ${soles(total)}`;
-  $("#subLine").textContent = E.config.proxSub
+  $("#subLine").innerHTML = (k.sobrante > 0 ? `<span class="gold">Sobrante del período: ${soles(k.sobrante)}</span><br>` : "") + esc(E.config.proxSub
     ? (k.subVencida ? "Próxima subvención: ¿ya llegó?" : `Próxima subvención: ~${k.D} día${k.D === 1 ? "" : "s"} (aprox.)`)
-    : "";
+    : "");
   const np = E.prestamos.filter((p) => pendienteP(p) > 0).length;
   $("#nPrest").textContent = np;
 
@@ -230,7 +270,7 @@ function renderInicio(k) {
   const prox = E.pagos.filter((p) => !p.pagadoEl).sort((a, b) => a.fecha.localeCompare(b.fecha))[0];
   if (prox) {
     const d = difDias(T, prox.fecha);
-    ch.push(`<div class="chip" data-act="irPagos"><div class="ico">📌</div><div class="t"><b>${esc(prox.nombre)} · ${soles(prox.monto)}</b><span>${d < 0 ? "Venció hace " + -d + " días" : d === 0 ? "Vence hoy" : "Vence el " + fechaCorta(prox.fecha)}</span></div></div>`);
+    ch.push(`<div class="chip" data-act="irPagos"><div class="ico">${prox.icono || "📌"}</div><div class="t"><b>${esc(prox.nombre)} · ${soles(prox.monto)}</b><span>${d < 0 ? "Venció hace " + -d + " días" : d === 0 ? "Vence hoy" : "Vence el " + fechaCorta(prox.fecha)}</span></div></div>`);
   }
   if (!E.movs.length) ch.push(`<div class="card suave" style="text-align:center">Toca <b class="verde">+</b> para registrar tu primer gasto. Desliza para ver los otros cuartos ↔</div>`);
   $("#chips").innerHTML = ch.join("");
@@ -250,11 +290,47 @@ function renderMovs() {
     if (x.fecha !== dia) { dia = x.fecha; html += `<div class="dia">${x.fecha === hoyISO() ? "Hoy" : fechaBonita(x.fecha)}</div>`; }
     const c = CATS[x.cat] || CATS.otros;
     const sub = [x.lugar ? LUGARES[x.lugar].slice(3) : "", x.hora].filter(Boolean).join(" · ");
-    html += `<div class="mov" data-act="editarMov" data-id="${x.id}"><div class="ico">${c.e}</div>
+    html += `<div class="mov" data-act="editarMov" data-id="${x.id}"><div class="ico">${x.icono || c.e}</div>
       <div class="t"><b>${esc(x.nota || c.n)}</b><span>${x.nota ? esc(c.n) + (sub ? " · " : "") : ""}${esc(sub)}</span></div>
       <div class="m ${x.tipo === "ingreso" ? "verde" : "coral"}">${x.tipo === "ingreso" ? "+" : "−"} ${soles(x.monto)}</div></div>`;
   }
   $("#listaMovs").innerHTML = html;
+}
+
+// ---- Presupuestos ----
+function renderPresup(k) {
+  const T = k.T, c = E.config;
+  const pres = comidaSemPresup(), gast = comidaGastada(T, addDias(T, 1));
+  const pct = pres ? Math.min(100, (gast / pres) * 100) : 0, queda = r2(pres - gast);
+  const finSem = addDias(lunesDe(T), 6), diasSem = difDias(T, finSem) + 1;
+  let h = `<div class="card sobrante"><div class="fila"><div style="flex:0 0 auto;font-size:34px">✨</div><div><small class="suave">Sobrante del período</small><div class="gold" style="font-size:28px">${soles(k.sobrante)}</div></div></div>
+    <div class="suave" style="font-size:13px;margin-top:4px">Lo que no gastas de tu diario se guarda aquí, no se suma al día siguiente. Los ingresos extra también caen aquí.</div>
+    ${k.sobrante >= 1 ? `<button class="btn oro full" style="margin-top:10px" data-act="sobranteAMeta">Pasarlo a mi copa 🏆</button>` : ""}</div>`;
+
+  h += `<div class="card"><h3>🥕 Comida esta semana</h3>${pres ? `
+    <div class="fila" style="justify-content:space-between"><span style="flex:none"><b>${soles(gast)}</b> de ${soles(pres)}</span><span style="flex:none" class="${queda < 0 ? "coral" : "verde"}">${queda < 0 ? "Te pasaste " + soles(-queda) : "Quedan " + soles(queda)}</span></div>
+    <div class="mini-barra" style="height:12px"><i style="width:${pct}%;background:${queda < 0 ? "var(--coral)" : pct > 80 ? "var(--dorado)" : "var(--verde)"}"></i></div>
+    <div class="suave" style="font-size:13px;margin-top:6px">${diasSem === 1 ? "Hoy termina la semana" : `Faltan ${diasSem} días para el lunes`}. ${queda < 0 ? "Lo que pasaste sale de tu diario." : "Registra tus compras como 🥕 Ingredientes."}</div>`
+    : `<div class="suave">No tienes presupuesto de comida. Ponlo en ⚙️ Ajustes.</div>`}</div>`;
+
+  // Pasajes y menú del período
+  const gastPas = suma(E.movs.filter((m) => m.cat === "transporte" && m.fecha >= k.P && m.fecha <= T), (m) => m.monto);
+  let nPas = 0, nMenu = 0, proxMenu = null;
+  for (let i = 0; i < k.D; i++) { const f = addDias(T, i), q = costoClase(f); if (q.pasaje) nPas++; if (q.menu) { nMenu++; if (!proxMenu) proxMenu = f; } }
+  h += `<div class="card"><h3>🚌 Pasajes</h3>${c.modo === "ciclo" && c.pasaje ? `
+    <div>Apartados: <b>${soles(nPas * c.pasaje)}</b> <span class="suave">(${nPas} día${nPas === 1 ? "" : "s"} de clase hasta tu subvención)</span></div>
+    <div class="suave" style="font-size:13px;margin-top:4px">Gastado este período: ${soles(gastPas)}${c.finCiclo ? ` · Clases hasta el ${fechaCorta(c.finCiclo)}` : ""}</div>`
+    : `<div class="suave">${c.modo === "vacaciones" ? "Estás en modo vacaciones: sin pasajes 🏡" : "Sin pasajes configurados."}</div>`}</div>`;
+  if (c.modo === "ciclo" && c.menu) h += `<div class="card"><h3>🍜 Menú en la U</h3><div>Apartados: <b>${soles(nMenu * c.menu)}</b> <span class="suave">(${nMenu} menú${nMenu === 1 ? "" : "s"})</span></div>
+    ${proxMenu ? `<div class="suave" style="font-size:13px;margin-top:4px">Próximo: ${proxMenu === T ? "hoy" : fechaBonita(proxMenu)}</div>` : ""}</div>`;
+
+  // Resumen de lo apartado
+  const filas = [["🥕 Comida", k.resComida], ["🚌 Pasajes y 🍜 menús", k.resClase], ["📌 Pagos programados", k.resPagos], ["🙏 Deudas por devolver", k.resDeudas]].filter((x) => x[1] > 0);
+  h += `<div class="card"><h3>🛡️ Lo que Brotty aparta por ti</h3><div class="suave" style="font-size:13px;margin-bottom:6px">Hasta tu próxima subvención (~${k.D} días)</div>
+    ${filas.map(([n, v]) => `<div class="fila" style="justify-content:space-between;margin:4px 0"><span style="flex:none">${n}</span><b style="flex:none">${soles(v)}</b></div>`).join("") || `<div class="suave">Nada apartado.</div>`}
+    <hr style="border:0;border-top:2px solid var(--borde);margin:8px 0"><div class="fila" style="justify-content:space-between"><span style="flex:none">Total apartado</span><b style="flex:none" class="gold">${soles(k.reservas)}</b></div>
+    <div class="fila" style="justify-content:space-between;margin-top:4px"><span style="flex:none">Tu diario fijo</span><b style="flex:none" class="verde">${soles(k.diario)}</b></div></div>`;
+  $("#presup").innerHTML = h;
 }
 
 // ---- Estadísticas ----
@@ -327,17 +403,35 @@ function renderStats() {
 
 // ---- Metas ----
 function copaSVG(pct) {
-  const h = 110 * Math.min(1, Math.max(0, pct / 100));
-  return `<svg viewBox="0 0 180 200"><defs><clipPath id="vaso"><path d="M30 20 L150 20 C 150 90,120 130,90 130 C 60 130,30 90,30 20 Z"/></clipPath>
-    <linearGradient id="liq" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe680"/><stop offset="1" stop-color="#e0a800"/></linearGradient></defs>
-    <path d="M30 34 C 0 34,0 80,40 86 M150 34 C 180 34,180 80,140 86" stroke="#c99400" stroke-width="8" fill="none" stroke-linecap="round"/>
-    <path d="M30 20 L150 20 C 150 90,120 130,90 130 C 60 130,30 90,30 20 Z" fill="#1a2c24"/>
-    <g clip-path="url(#vaso)"><rect x="20" y="${130 - h}" width="140" height="${h}" fill="url(#liq)"><animate attributeName="y" values="${130 - h + 2};${130 - h - 2};${130 - h + 2}" dur="3s" repeatCount="indefinite"/></rect>
-    ${h > 8 ? `<circle cx="70" cy="${136 - h / 2}" r="4" fill="#fff" opacity=".5"/><circle cx="104" cy="${140 - h / 3}" r="3" fill="#fff" opacity=".4"/>` : ""}</g>
-    <path d="M30 20 L150 20 C 150 90,120 130,90 130 C 60 130,30 90,30 20 Z" fill="none" stroke="#ffd23f" stroke-width="6"/>
-    <rect x="80" y="130" width="20" height="30" fill="#ffd23f" stroke="#7a5200" stroke-width="3"/>
-    <rect x="52" y="160" width="76" height="20" rx="6" fill="#ffd23f" stroke="#7a5200" stroke-width="4"/>
-    <text x="90" y="${pct >= 50 ? 80 : 60}" text-anchor="middle" font-size="22" font-weight="900" fill="${pct >= 50 ? "#4a3300" : "#ffd23f"}" font-family="Nunito,Arial">${Math.round(pct)}%</text></svg>`;
+  const p = Math.min(1, Math.max(0, pct / 100)), top = 40, bot = 150, y = bot - (bot - top) * p, lleno = p >= 1;
+  const ola = `M10 ${y} q 15 -7 30 0 t 30 0 t 30 0 t 30 0 t 30 0 t 30 0 t 30 0 V 200 H 10 Z`;
+  return `<svg viewBox="0 0 200 230" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="oro" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#b8860b"/><stop offset=".35" stop-color="#ffe680"/><stop offset=".6" stop-color="#ffd23f"/><stop offset="1" stop-color="#a87400"/></linearGradient>
+      <linearGradient id="liq" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7dffb0"/><stop offset="1" stop-color="#1fae5c"/></linearGradient>
+      <clipPath id="vaso"><path d="M44 36 L156 36 C 156 112,132 152,100 152 C 68 152,44 112,44 36 Z"/></clipPath>
+    </defs>
+    ${lleno ? `<circle cx="100" cy="95" r="88" fill="#ffd23f" opacity=".12"/>` : ""}
+    <path d="M44 52 C 8 50,8 108,56 112" stroke="url(#oro)" stroke-width="11" fill="none" stroke-linecap="round"/>
+    <path d="M156 52 C 192 50,192 108,144 112" stroke="url(#oro)" stroke-width="11" fill="none" stroke-linecap="round"/>
+    <path d="M44 36 L156 36 C 156 112,132 152,100 152 C 68 152,44 112,44 36 Z" fill="#0f1e18"/>
+    <g clip-path="url(#vaso)">
+      <path d="${ola}" fill="url(#liq)" opacity=".95"><animateTransform attributeName="transform" type="translate" values="0 0;-30 0;0 0" dur="4s" repeatCount="indefinite"/></path>
+      ${p > 0.05 ? `<circle cx="80" cy="140" r="4" fill="#fff" opacity=".6"><animate attributeName="cy" values="148;${y + 6}" dur="3s" repeatCount="indefinite"/><animate attributeName="opacity" values=".7;0" dur="3s" repeatCount="indefinite"/></circle>
+      <circle cx="114" cy="140" r="3" fill="#fff" opacity=".5"><animate attributeName="cy" values="150;${y + 6}" dur="2.3s" repeatCount="indefinite"/><animate attributeName="opacity" values=".6;0" dur="2.3s" repeatCount="indefinite"/></circle>
+      <circle cx="98" cy="140" r="2.5" fill="#fff" opacity=".5"><animate attributeName="cy" values="150;${y + 6}" dur="3.6s" repeatCount="indefinite"/><animate attributeName="opacity" values=".6;0" dur="3.6s" repeatCount="indefinite"/></circle>` : ""}
+    </g>
+    <path d="M44 36 L156 36 C 156 112,132 152,100 152 C 68 152,44 112,44 36 Z" fill="none" stroke="url(#oro)" stroke-width="8" stroke-linejoin="round"/>
+    <path d="M38 32 L162 32" stroke="url(#oro)" stroke-width="10" stroke-linecap="round"/>
+    <path d="M58 48 C 58 92,70 122,86 136" stroke="#fff" stroke-width="7" fill="none" stroke-linecap="round" opacity=".35"/>
+    <path d="M88 152 L112 152 L108 178 L92 178 Z" fill="url(#oro)" stroke="#7a5200" stroke-width="3" stroke-linejoin="round"/>
+    <rect x="62" y="176" width="76" height="16" rx="6" fill="url(#oro)" stroke="#7a5200" stroke-width="3"/>
+    <rect x="52" y="192" width="96" height="24" rx="8" fill="#3a2a10" stroke="#7a5200" stroke-width="3"/>
+    <text x="100" y="209" text-anchor="middle" font-size="14" font-weight="900" fill="#ffd23f" font-family="Nunito,Arial">${Math.round(pct)}%</text>
+    <path d="M172 20 l3 8 8 3 -8 3 -3 8 -3 -8 -8 -3 8 -3z" fill="#fff8c0"><animate attributeName="opacity" values="1;.2;1" dur="2s" repeatCount="indefinite"/></path>
+    <path d="M24 130 l2 6 6 2 -6 2 -2 6 -2 -6 -6 -2 6 -2z" fill="#fff8c0"><animate attributeName="opacity" values=".2;1;.2" dur="2.6s" repeatCount="indefinite"/></path>
+    ${lleno ? `<g transform="translate(100 34)"><path d="M0 0 C -2 -14,0 -22,4 -28" stroke="#2a7a14" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M4 -26 C 12 -38,30 -38,34 -30 C 24 -24,14 -22,4 -26 Z" fill="#7dff6a" stroke="#123d0a" stroke-width="3"/><path d="M2 -22 C -8 -32,-22 -30,-24 -24 C -16 -18,-6 -18,2 -22 Z" fill="#5fd64a" stroke="#123d0a" stroke-width="3"/></g>` : ""}
+  </svg>`;
 }
 function mesesSinPedir() {
   const pap = E.movs.filter((m) => m.cat === "papas").map((m) => m.fecha).sort();
@@ -374,7 +468,7 @@ function renderPagos(k) {
   let h = `<div class="card"><h3>📌 Pagos programados</h3><div class="suave" style="font-size:13px">Se apartan solos antes de calcular tu diario.</div>`;
   h += pend.length ? pend.map((p) => {
     const d = difDias(T, p.fecha), antes = p.fecha < k.S;
-    return `<div class="mov" style="margin-top:8px;cursor:default"><div class="ico">🏠</div><div class="t"><b>${esc(p.nombre)}</b><span>${d < 0 ? `<span class="coral">Venció hace ${-d} días</span>` : d === 0 ? "Vence hoy" : "Vence el " + fechaCorta(p.fecha)}${p.mensual ? " · cada mes" : ""}${antes ? " · apartado" : ""}</span></div>
+    return `<div class="mov" style="margin-top:8px;cursor:default"><div class="ico">${p.icono || "🏠"}</div><div class="t"><b>${esc(p.nombre)}</b><span>${d < 0 ? `<span class="coral">Venció hace ${-d} días</span>` : d === 0 ? "Vence hoy" : "Vence el " + fechaCorta(p.fecha)}${p.mensual ? " · cada mes" : ""}${antes ? " · apartado" : ""}</span></div>
       <div style="text-align:right"><div class="m">${soles(p.monto)}</div><div class="fila" style="gap:4px;margin-top:4px"><button class="btn chico" data-act="pagar" data-id="${p.id}">Pagar</button><button class="btn chico sec" data-act="editarPago" data-id="${p.id}">✎</button></div></div></div>`;
   }).join("") : `<div class="vacio">Sin pagos programados.</div>`;
   h += `<button class="btn sec full" style="margin-top:10px" data-act="nuevoPago">+ Agregar pago</button></div>`;
@@ -477,8 +571,8 @@ function leerCamposReg() {
 // ---------- Acciones ----------
 const ACT = {
   cerrar: () => cerrar(),
-  irPrestamos: () => irA(4), irPagos: () => irA(4), irMetas: () => irA(3),
-  nuevo: () => nuevoRegistro(roomIdx === 4 ? "prestamo" : "gasto"),
+  irPrestamos: () => irA(5), irPagos: () => irA(5), irMetas: () => irA(4), irPresup: () => irA(2),
+  nuevo: () => nuevoRegistro(roomIdx === 5 ? "prestamo" : "gasto"),
   regTab: (d) => { leerCamposReg(); R.tab = d.t; R.cat = null; pintarRegistro(); },
   regTipoP: (d) => { leerCamposReg(); R.tipoP = d.t; pintarRegistro(); },
   regCat: (d) => { R.cat = d.c; pintarRegistro(); },
@@ -534,9 +628,9 @@ const ACT = {
     if (m && m.pagoId) { const p = E.pagos.find((x) => x.id === m.pagoId); if (p) p.pagadoEl = null; }
     E.movs = E.movs.filter((x) => x.id !== d.id); guardar(); cerrar();
   },
-  movMes: (d) => { const [y, m] = movMes.split("-").map(Number); movMes = fechaISO(new Date(y, m - 1 + +d, 1)).slice(0, 7); renderMovs(); },
+  movMes: (d) => { const [y, m] = movMes.split("-").map(Number); movMes = fechaISO(new Date(y, m - 1 + +d.d, 1)).slice(0, 7); renderMovs(); },
   statsModo: (d) => { statsModo = d.m; statsOff = 0; renderStats(); },
-  statsNav: (d) => { statsOff = Math.min(0, statsOff + +d); renderStats(); },
+  statsNav: (d) => { statsOff = Math.min(0, statsOff + +d.d); renderStats(); },
   tocarBrotty: () => {
     const k = calc(), b = $("#brotty");
     b.classList.remove("salto"); void b.offsetWidth; b.classList.add("salto");
@@ -557,8 +651,9 @@ const ACT = {
   guardarSub: () => {
     const monto = r2(parseFloat($("#sMonto").value)), prox = $("#sProx").value;
     if (!(monto > 0) || !prox) return toast("Completa monto y fecha");
+    const sobAnt = Math.floor(sobranteHasta(hoyISO(), E.config.proxSub || hoyISO()));
     E.movs.push({ id: uid(), tipo: "ingreso", cat: "subvencion", monto, lugar: null, fecha: hoyISO(), hora: horaAhora(), nota: "", creado: Date.now() });
-    E.config.proxSub = prox; despuesDeSubvencion(); guardar(); cerrar(); celebrar(); sugerirMeta();
+    E.config.proxSub = prox; despuesDeSubvencion(); guardar(); cerrar(); celebrar(); sugerirMeta(sobAnt);
   },
   cambiarFechaSub: () => abrir(() => {
     sheet.innerHTML = `${btnCerrar()}<h2>Próxima subvención</h2><p class="nota">Pon la fecha aproximada; la puedes cambiar cuando quieras.</p>
@@ -569,11 +664,13 @@ const ACT = {
   // Pagos programados
   nuevoPago: () => formPago(),
   editarPago: (d) => formPago(E.pagos.find((p) => p.id === d.id)),
+  elegirIcono: (d, el) => { document.querySelectorAll("#pIconos button").forEach((b) => b.classList.toggle("on", b === el)); },
   guardarPago: (d) => {
+    const icono = $("#pIconos button.on")?.dataset.i || "🏠";
     const nombre = $("#pNombre").value.trim(), monto = r2(parseFloat($("#pMonto").value)), fecha = $("#pFecha").value, mensual = $("#pMensual").checked;
     if (!nombre || !(monto > 0) || !fecha) return toast("Completa nombre, monto y fecha");
-    if (d.id) Object.assign(E.pagos.find((p) => p.id === d.id), { nombre, monto, fecha, mensual });
-    else E.pagos.push({ id: uid(), nombre, monto, fecha, mensual, pagadoEl: null, creadoEl: hoyISO() });
+    if (d.id) Object.assign(E.pagos.find((p) => p.id === d.id), { nombre, monto, fecha, mensual, icono });
+    else E.pagos.push({ id: uid(), nombre, monto, fecha, mensual, icono, pagadoEl: null, creadoEl: hoyISO() });
     guardar(); cerrar();
   },
   borrarPago: (d) => { if (confirm("¿Borrar este pago programado?")) { E.pagos = E.pagos.filter((p) => p.id !== d.id); guardar(); cerrar(); } },
@@ -588,9 +685,9 @@ const ACT = {
     const p = E.pagos.find((x) => x.id === d.id), monto = r2(parseFloat($("#pgMonto").value));
     if (!(monto > 0)) return toast("Monto inválido");
     const T = hoyISO();
-    E.movs.push({ id: uid(), tipo: "gasto", cat: "pagos", monto, lugar: null, fecha: T, hora: horaAhora(), nota: p.nombre, creado: Date.now(), pagoId: p.id });
+    E.movs.push({ id: uid(), tipo: "gasto", cat: "pagos", monto, lugar: null, fecha: T, hora: horaAhora(), nota: p.nombre, creado: Date.now(), pagoId: p.id, icono: p.icono });
     p.pagadoEl = T;
-    if (p.mensual) E.pagos.push({ id: uid(), nombre: p.nombre, monto: p.monto, fecha: addMeses(p.fecha, 1), mensual: true, pagadoEl: null, creadoEl: T, recurrente: true });
+    if (p.mensual) E.pagos.push({ id: uid(), nombre: p.nombre, monto: p.monto, fecha: addMeses(p.fecha, 1), mensual: true, icono: p.icono, pagadoEl: null, creadoEl: T, recurrente: true });
     guardar(); cerrar(); toast(`${esc(p.nombre)} pagado ✓`);
   },
 
@@ -637,6 +734,7 @@ const ACT = {
   borrarMeta: (d) => { if (confirm("¿Borrar la meta? Lo apartado vuelve a tu dinero libre.")) { E.metas = E.metas.filter((x) => x.id !== d.id); guardar(); } },
 
   // Respaldo y ajustes
+  sobranteAMeta: () => { if (!E.metas.length) return ACT.nuevaMeta(); formMeta(E.metas[0].id, 1); },
   respaldo: () => hacerRespaldo(),
   omitirRespaldo: () => { E.config.respaldoPendiente = false; guardar(); },
   ajustes: () => abrir(pintarAjustes),
@@ -651,7 +749,7 @@ const ACT = {
     });
     if (!c.setup) { c.setup = true; c.saldoInicial = r2(+v("#aSaldo") || 0); c.fechaInicio = hoyISO(); }
     guardar(); cerrar(); toast("Ajustes guardados");
-    if (!E.pagos.length && c.setup && !localStorage.getItem("brotty-pagos-sugeridos")) { localStorage.setItem("brotty-pagos-sugeridos", "1"); setTimeout(() => { irA(4); toast("Agrega tus pagos fijos (cuarto, etc.) aquí 📌"); }, 400); }
+    if (!E.pagos.length && c.setup && !localStorage.getItem("brotty-pagos-sugeridos")) { localStorage.setItem("brotty-pagos-sugeridos", "1"); setTimeout(() => { irA(5); toast("Agrega tus pagos fijos (cuarto, etc.) aquí 📌"); }, 400); }
   },
   ajustarSaldo: () => {
     const real = parseFloat(prompt("¿Cuánto dinero tienes realmente ahora (sin contar metas)? S/"));
@@ -685,6 +783,7 @@ function formPago(p) {
   abrir(() => {
     sheet.innerHTML = `${btnCerrar()}<h2>${p ? "Editar pago" : "Nuevo pago programado"}</h2>
       <label>Nombre</label><input type="text" id="pNombre" maxlength="30" placeholder="Ej: Cuarto" value="${esc(p?.nombre || "")}">
+      <label>Ícono</label><div class="chips-sel" id="pIconos">${ICONOS_PAGO.map((i) => `<button class="${(p?.icono || "🏠") === i ? "on" : ""}" data-act="elegirIcono" data-i="${i}" style="font-size:20px;padding:6px 9px">${i}</button>`).join("")}</div>
       <label>Monto (S/)</label><input type="number" id="pMonto" inputmode="decimal" value="${p?.monto || ""}">
       <label>Fecha en que vence</label><input type="date" id="pFecha" value="${p?.fecha || ""}">
       <label class="check"><input type="checkbox" id="pMensual" ${p ? (p.mensual ? "checked" : "") : "checked"}> Se repite cada mes</label>
@@ -692,21 +791,20 @@ function formPago(p) {
       ${p ? `<button class="btn rojo full" style="margin-top:8px" data-act="borrarPago" data-id="${p.id}">Borrar</button>` : ""}`;
   });
 }
-function formMeta(id, signo) {
+function formMeta(id, signo, sugerido) {
   const m = E.metas.find((x) => x.id === id), k = calc();
-  const sug = signo > 0 ? Math.max(0, Math.floor(((k.libreReal - k.D * 8) * 0.3) / 5) * 5) : 0;
+  const sug = signo > 0 ? Math.floor(sugerido ?? k.sobrante) : 0;
   abrir(() => {
     sheet.innerHTML = `${btnCerrar()}<h2>${signo > 0 ? "Apartar para" : "Sacar de"} ${esc(m.nombre)}</h2>
-      ${signo > 0 ? `<p class="nota">${sug > 0 ? `Brotty sugiere <b class="gold">${soles(sug)}</b>: es lo que puedes apartar sin tocar tus pagos ni dejar tu diario muy bajo.` : "Ahora mismo Brotty no recomienda apartar: tu margen está justo. Puedes hacerlo igual si quieres."}</p>` : `<p class="nota">Hay ${soles(ahorradoMeta(m))} en esta meta. Lo que saques vuelve a tu dinero libre.</p>`}
+      ${signo > 0 ? `<p class="nota">${sug > 0 ? `Brotty sugiere <b class="gold">${soles(sug)}</b>: es tu sobrante, lo que no gastaste. Apartarlo no toca tu diario.` : "Aún no tienes sobrante. Si apartas igual, tu diario de los próximos días bajará un poco."}</p>` : `<p class="nota">Hay ${soles(ahorradoMeta(m))} en esta meta. Lo que saques vuelve a tu dinero libre.</p>`}
       <label>Monto (S/)</label><input type="number" id="aMonto" inputmode="decimal" value="${sug || ""}">
       <button class="btn ${signo > 0 ? "oro" : "sec"} full" style="margin-top:14px" data-act="guardarAporte" data-id="${id}" data-s="${signo}">${signo > 0 ? "Apartar" : "Sacar"}</button>`;
   });
 }
 function despuesDeSubvencion() { E.config.respaldoPendiente = true; }
-function sugerirMeta() {
-  if (!E.metas.length) return;
-  const k = calc(), sug = Math.max(0, Math.floor(((k.libreReal - k.D * 8) * 0.3) / 5) * 5);
-  if (sug > 0) setTimeout(() => toast(`Brotty: podrías apartar ${soles(sug)} para "${esc(E.metas[0].nombre)}" 🏆`), 1800);
+function sugerirMeta(sobAnt) {
+  if (!E.metas.length || !(sobAnt > 0)) return;
+  setTimeout(() => { toast(`El período pasado te sobraron ${soles(sobAnt)} 🎉`); formMeta(E.metas[0].id, 1, sobAnt); }, 1200);
 }
 function saltar() { const b = $("#brotty"); b.classList.remove("salto"); void b.offsetWidth; b.classList.add("salto"); }
 
@@ -737,7 +835,7 @@ function pintarAjustes() {
       <button class="btn sec full" style="margin-top:8px" data-act="ajustarSaldo">⚖️ Corregir mi saldo</button>
       ${localStorage.getItem("mis-finanzas-v1") ? `<button class="btn sec full" style="margin-top:8px" data-act="importarViejo">Importar datos de la versión de prueba</button>` : ""}
       <button class="btn rojo full" style="margin-top:16px" data-act="borrarTodo">Borrar todos los datos</button>
-      <p class="nota" style="text-align:center;margin-top:12px">Brotty v1 · ${c.ultimoRespaldo ? "Último respaldo: " + fechaCorta(c.ultimoRespaldo) : "Sin respaldos aún"}</p>` : ""}`;
+      <p class="nota" style="text-align:center;margin-top:12px">Brotty v2 · ${c.ultimoRespaldo ? "Último respaldo: " + fechaCorta(c.ultimoRespaldo) : "Sin respaldos aún"}</p>` : ""}`;
   const inp = $("#archivoRestaurar");
   if (inp) inp.onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return;
